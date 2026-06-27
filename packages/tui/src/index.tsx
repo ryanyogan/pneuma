@@ -1,16 +1,38 @@
-import { createCliRenderer, TextAttributes } from "@opentui/core";
+import { ConsolePosition, createCliRenderer } from "@opentui/core";
 import { createRoot } from "@opentui/react";
+import { Header } from "./components/header";
+import { InputBar } from "./components/input-bar";
 
 function App() {
   return (
-    <box alignItems="center" justifyContent="center" flexGrow={1}>
-      <box justifyContent="center" alignItems="flex-end">
-        <ascii-font font="tiny" text="OpenTUI" />
-        <text attributes={TextAttributes.DIM}>What will you build?</text>
+    <box
+      alignItems="center"
+      justifyContent="center"
+      // backgroundColor="#0D0D12"
+      height="100%"
+      width="100%"
+      gap={2}
+    >
+      <Header />
+
+      <box width="100%" maxWidth={78} paddingX={2}>
+        <InputBar onSubmit={(text: string) => console.log(text)} />
       </box>
     </box>
   );
 }
 
-const renderer = await createCliRenderer();
+const renderer = await createCliRenderer({
+  // Required so the terminal reports modifiers (shift/ctrl/alt) on keys like
+  // Enter. Without `disambiguate`, Shift+Enter is indistinguishable from Enter
+  // and the `shift: true` newline binding can never match.
+  useKittyKeyboard: {
+    disambiguate: true,
+    alternateKeys: true,
+  },
+  consoleOptions: {
+    position: ConsolePosition.BOTTOM,
+    sizePercent: 30,
+  },
+});
 createRoot(renderer).render(<App />);

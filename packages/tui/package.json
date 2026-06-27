@@ -1,5 +1,5 @@
 {
-  "name": "tui",
+  "name": "@pneuma/tui",
   "module": "src/index.tsx",
   "type": "module",
   "private": true,
@@ -7,7 +7,8 @@
     "dev": "bun run --watch src/index.tsx"
   },
   "devDependencies": {
-    "@types/bun": "latest"
+    "@types/bun": "latest",
+    "@types/react": "^19"
   },
   "peerDependencies": {
     "typescript": "^5"
