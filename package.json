@@ -1,0 +1,10 @@
+{
+  "name": "pneuma",
+  "version": "0.0.0",
+  "scripts": {
+    "dev:tui": "bun run --watch packages/tui/src/index.tsx"
+  },
+  "workspaces": [
+    "packages/*"
+  ]
+}
