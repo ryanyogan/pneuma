@@ -8,7 +8,7 @@ function App() {
     <box
       alignItems="center"
       justifyContent="center"
-      // backgroundColor="#0D0D12"
+      backgroundColor="#0D0D12"
       height="100%"
       width="100%"
       gap={2}
