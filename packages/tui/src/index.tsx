@@ -25,7 +25,6 @@ function App() {
 const renderer = await createCliRenderer({
   // Required so the terminal reports modifiers (shift/ctrl/alt) on keys like
   // Enter. Without `disambiguate`, Shift+Enter is indistinguishable from Enter
-  // and the `shift: true` newline binding can never match.
   useKittyKeyboard: {
     disambiguate: true,
     alternateKeys: true,
@@ -34,5 +33,6 @@ const renderer = await createCliRenderer({
     position: ConsolePosition.BOTTOM,
     sizePercent: 30,
   },
+  targetFps: 60,
 });
 createRoot(renderer).render(<App />);
