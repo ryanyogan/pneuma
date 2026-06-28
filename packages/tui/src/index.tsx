@@ -31,8 +31,9 @@ const renderer = await createCliRenderer({
   },
   consoleOptions: {
     position: ConsolePosition.BOTTOM,
-    sizePercent: 30,
+    sizePercent: 20,
   },
   targetFps: 60,
+  exitOnCtrlC: false,
 });
 createRoot(renderer).render(<App />);
