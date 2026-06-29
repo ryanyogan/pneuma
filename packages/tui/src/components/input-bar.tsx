@@ -1,11 +1,12 @@
 import type { KeyBinding, TextareaRenderable } from "@opentui/core";
 import { StatusBar } from "./status-bar";
 import { CommandMenu } from "./command-menu";
-import { useCallback, useRef } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import { useRenderer } from "@opentui/react";
 import { useCommandMenu } from "./command-menu/use-command-menu";
 import type { Command } from "./command-menu/types";
 import { useToast } from "../providers/toast";
+import { useKeyboardLayer } from "../providers/keyboard-layer";
 
 type Props = {
   onSubmit: (text: string) => void;
@@ -25,6 +26,7 @@ export function InputBar({ onSubmit, disabled = false }: Props) {
   const textareaRef = useRef<TextareaRenderable>(null);
   const renderer = useRenderer();
   const toast = useToast();
+  const { isTopLayer, setResponder } = useKeyboardLayer();
 
   const {
     handleContentChange,
@@ -95,6 +97,21 @@ export function InputBar({ onSubmit, disabled = false }: Props) {
     onSubmit,
   ]);
 
+  useEffect(() => {
+    setResponder("base", () => {
+      if (disabled) return false;
+
+      const textarea = textareaRef.current;
+      if (textarea && textarea.plainText.length > 0) {
+        textarea.setText("");
+        return true;
+      }
+      return false;
+    });
+
+    return () => setResponder("base", null);
+  }, [disabled, setResponder]);
+
   return (
     <box width="100%" alignItems="center">
       <box width="100%" border={["left"]} borderColor="cyan">
@@ -130,7 +147,7 @@ export function InputBar({ onSubmit, disabled = false }: Props) {
             onSubmit={handleSubmit}
             keyBindings={TEXTAREA_KEY_BINDINGS}
             onContentChange={handleContentChangeEvent}
-            focused={!disabled}
+            focused={!disabled && (isTopLayer("base") || isTopLayer("command"))}
             placeholder={`Let's build... "What are we using today?!`}
           />
 
