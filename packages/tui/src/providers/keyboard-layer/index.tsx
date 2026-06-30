@@ -16,11 +16,13 @@ import {
 type Responder = () => boolean;
 
 type KeyboardLayerContextValue = {
-  push: (id: string, responder?: Responder) => void;
-  pop: (id: string) => void;
-  isTopLayer: (id: string) => boolean;
-  setResponder: (id: string, responder: Responder | null) => void;
+  push: (id: Layer, responder?: Responder) => void;
+  pop: (id: Layer) => void;
+  isTopLayer: (id: Layer) => boolean;
+  setResponder: (id: Layer, responder: Responder | null) => void;
 };
+
+export type Layer = "base" | "command" | "dialog";
 
 const KeyboardLayerContext = createContext<KeyboardLayerContextValue | null>(
   null,
@@ -44,19 +46,16 @@ export function KeyboardLayerProvider({ children }: { children: ReactNode }) {
   const renderer = useRenderer();
 
   // The single place that mutates the responder map; push/pop delegate here.
-  const setResponder = useCallback(
-    (id: string, responder: Responder | null) => {
-      if (responder) {
-        responders.current.set(id, responder);
-      } else {
-        responders.current.delete(id);
-      }
-    },
-    [],
-  );
+  const setResponder = useCallback((id: Layer, responder: Responder | null) => {
+    if (responder) {
+      responders.current.set(id, responder);
+    } else {
+      responders.current.delete(id);
+    }
+  }, []);
 
   const push = useCallback(
-    (id: string, responder?: Responder) => {
+    (id: Layer, responder?: Responder) => {
       if (responder) {
         setResponder(id, responder);
       }
@@ -67,7 +66,7 @@ export function KeyboardLayerProvider({ children }: { children: ReactNode }) {
   );
 
   const pop = useCallback(
-    (id: string) => {
+    (id: Layer) => {
       setResponder(id, null);
       setStack((stack) => stack.filter((layer) => layer !== id));
     },
