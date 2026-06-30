@@ -1,8 +1,14 @@
-import { createContext, useCallback, useContext, useState } from "react";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useState,
+  type ReactNode,
+} from "react";
 import { useKeyboardLayer } from "../keyboard-layer";
 import type { DialogConfig, DialogContextValue } from "./types";
 import { useKeyboard, useTerminalDimensions } from "@opentui/react";
-import { dim, RGBA, TextAttributes } from "@opentui/core";
+import { RGBA, TextAttributes } from "@opentui/core";
 
 const DialogContext = createContext<DialogContextValue | null>(null);
 
@@ -15,7 +21,7 @@ export function useDialog(): DialogContextValue {
   return value;
 }
 
-export function DialogProvider({ children }: DialogConfig) {
+export function DialogProvider({ children }: { children: ReactNode }) {
   const [currentDialog, setCurrentDialog] = useState<DialogConfig | null>(null);
   const { push, pop } = useKeyboardLayer();
 
@@ -86,7 +92,7 @@ function Dialog({ currentDialog, close }: DialogProps) {
       onMouseDown={() => close()}
     >
       <box
-        width={Math.min(60, dimensions.width - 4)}
+        width={Math.min(60, dimensions.width)}
         height="auto"
         backgroundColor="#1a1a24"
         paddingX={4}
@@ -106,6 +112,7 @@ function Dialog({ currentDialog, close }: DialogProps) {
             esc
           </text>
         </box>
+        <box flexGrow={1}>{children}</box>
       </box>
     </box>
   );

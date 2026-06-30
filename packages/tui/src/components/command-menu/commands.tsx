@@ -13,6 +13,12 @@ export const COMMANDS: Command[] = [
     name: "agents",
     description: "Switch agents",
     value: "/agents",
+    action: (context) => {
+      context.dialog.open({
+        title: "Select Mode",
+        children: <text>Agent selection coming soon...</text>,
+      });
+    },
   },
   {
     name: "models",
