@@ -2,9 +2,13 @@
   "name": "pneuma-workspace",
   "version": "0.0.0",
   "scripts": {
-    "dev:tui": "bun run --watch packages/tui/src/index.tsx"
+    "dev:tui": "bun run --watch packages/tui/src/index.tsx",
+    "dev:server": "bun run --watch packages/server/src/index.ts"
   },
   "workspaces": [
     "packages/*"
-  ]
+  ],
+  "devDependencies": {
+    "@types/bun": "^1.3.14"
+  }
 }

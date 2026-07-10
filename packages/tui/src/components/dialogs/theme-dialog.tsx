@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useRef } from "react";
 import { useDialog } from "../../providers/dialog";
 import { useTheme } from "../../providers/theme";
-import { THEMES, type Theme } from "../theme";
+import { readableTextColor, THEMES, type Theme } from "../theme";
 import { DialogSearchList } from "../dialog-search-list";
 
 export const ThemeDialogContent = () => {
   const dialog = useDialog();
-  const { setTheme, currentTheme } = useTheme();
+  const { setTheme, currentTheme, colors } = useTheme();
   const originaThemeRef = useRef(currentTheme);
   const userConfirmed = useRef(false);
 
@@ -43,7 +43,10 @@ export const ThemeDialogContent = () => {
         theme.name.toLowerCase().includes(query.toLowerCase())
       }
       renderItem={(theme, isSelected) => (
-        <text selectable={false} fg={isSelected ? "black" : "white"}>
+        <text
+          selectable={false}
+          fg={isSelected ? readableTextColor(colors.selection) : colors.text}
+        >
           {theme.name === originaThemeRef.current.name
             ? "\u0020\u2022\u0020"
             : "\u0020\u0020\u0020"}

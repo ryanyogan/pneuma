@@ -1,4 +1,3 @@
-import { TextAttributes } from "@opentui/core";
 import { useTheme } from "../../providers/theme";
 
 export function ErrorMessage({ message }: { message: string }) {
@@ -13,7 +12,7 @@ export function ErrorMessage({ message }: { message: string }) {
           backgroundColor={colors.surface}
           width="100%"
         >
-          <text attributes={TextAttributes.DIM}>{message}</text>
+          <text fg={colors.text}>{message}</text>
         </box>
       </box>
     </box>

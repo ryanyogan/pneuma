@@ -13,14 +13,14 @@ export function BotMessage({
     <box width="100%" alignItems="center">
       <box paddingY={1} width="100%">
         <box paddingX={3} width="100%">
-          <text>{content}</text>
+          <text fg={colors.text}>{content}</text>
         </box>
       </box>
 
       <box paddingX={3} paddingBottom={1} gap={1} width="100%">
         <box flexDirection="row" gap={1}>
           <text fg={colors.primary}>◉</text>
-          <text>{model}</text>
+          <text fg={colors.textMuted}>{model}</text>
         </box>
       </box>
     </box>

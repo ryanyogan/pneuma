@@ -115,7 +115,7 @@ function Toast({ currentToast }: ToastProps) {
       border={["left", "right"]}
     >
       <box flexDirection="column" gap={1} width="100%">
-        <text fg="#e1e1e1" wrapMode="word" width="100%">
+        <text fg={colors.text} wrapMode="word" width="100%">
           {currentToast.message}
         </text>
       </box>

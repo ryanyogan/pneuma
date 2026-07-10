@@ -3,6 +3,7 @@ import { COMMANDS } from "./commands";
 import { TextAttributes, type ScrollBoxRenderable } from "@opentui/core";
 import type { Command } from "./types";
 import { useTheme } from "../../providers/theme";
+import { readableTextColor } from "../theme";
 
 const MAX_VISIBLE_ITEMS = 8;
 
@@ -26,6 +27,7 @@ export function CommandMenu({
 }: CommandMenuProps) {
   const visibleHeight = Math.min(commands.length, MAX_VISIBLE_ITEMS);
   const { colors } = useTheme();
+  const selectedFg = readableTextColor(colors.selection);
 
   if (commands.length === 0) {
     return (
@@ -52,13 +54,16 @@ export function CommandMenu({
             onMouseDown={() => onExecute(idx)}
           >
             <box width={COMMAND_COL_WIDTH} flexShrink={0}>
-              <text selectable={false} fg={isSelected ? "black" : "white"}>
+              <text selectable={false} fg={isSelected ? selectedFg : colors.text}>
                 /{command.name}
               </text>
             </box>
 
             <box flexGrow={1} flexShrink={1} overflow="hidden">
-              <text selectable={false} fg={isSelected ? "black" : "gray"}>
+              <text
+                selectable={false}
+                fg={isSelected ? selectedFg : colors.textMuted}
+              >
                 {command.description}
               </text>
             </box>

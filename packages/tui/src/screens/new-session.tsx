@@ -1,31 +1,89 @@
-import { useEffect } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { useLocation, useNavigate } from "react-router";
-import { BotMessage, ErrorMessage, UserMessage } from "../components/messages";
-import { SessionShell } from "../components/session-shell";
+import { UserMessage } from "../components/messages";
+import { z } from "zod";
+import { useToast } from "../providers/toast";
+import { apiClient } from "../lib/api-client";
+import { DEFAULT_CHAT_MODEL_ID } from "@pneuma/shared";
+import { getErrorMessage } from "../lib/http-error";
+
+const newSessionStateSchema = z.object({
+  message: z.string(),
+});
 
 export function NewSession() {
   const navigate = useNavigate();
   const location = useLocation();
-  const state = location.state as { message?: string } | null;
+  const toast = useToast();
+  const hasStarted = useRef(false);
+
+  const state = useMemo(() => {
+    const parsed = newSessionStateSchema.safeParse(location.state);
+    return parsed.success ? parsed.data : null;
+  }, [location.state]);
 
   useEffect(() => {
-    if (!state?.message) {
+    if (!state) {
       navigate("/", { replace: true });
     }
   }, [state, navigate]);
 
-  if (!state?.message) return null;
+  useEffect(() => {
+    if (!state || hasStarted.current) return;
 
-  return (
-    <SessionShell onSubmit={() => {}} inputDisabled loading>
-      <UserMessage message={state.message} />
+    hasStarted.current = true;
+    let ignore = false;
 
-      <BotMessage
-        content="This is a sample bot response message."
-        model="fabel-5"
-      />
+    const createSession = async () => {
+      if (ignore) return;
 
-      <ErrorMessage message="Sample error message and such" />
-    </SessionShell>
-  );
+      try {
+        const res = await apiClient.sessions.$post({
+          json: {
+            title: state.message.slice(0, 100),
+            cwd: process.cwd(),
+            initialMessage: {
+              role: "USER",
+              content: state.message,
+              mode: "BUILD",
+              model: DEFAULT_CHAT_MODEL_ID,
+            },
+          },
+        });
+
+        if (!res.ok) {
+          throw new Error(await getErrorMessage(res));
+        }
+
+        const session = await res.json();
+        navigate(`/sessions/${session.id}`, {
+          replace: true,
+          state: {
+            session,
+          },
+        });
+      } catch (error) {
+        toast.show({
+          variant: "error",
+          message:
+            error instanceof Error ? error.message : "Failed to create session",
+        });
+
+        navigate("/", { replace: true });
+      }
+    };
+
+    createSession();
+
+    return () => {
+      ignore = true;
+    };
+  }, [state, navigate, toast]);
+
+  if (!state) return null;
+
+  // The shell (scrollbox, input, spinner) lives in SessionLayout; render only
+  // the content. Loading is already `true` by default in the layout while the
+  // session is being created.
+  return <UserMessage message={state.message} />;
 }

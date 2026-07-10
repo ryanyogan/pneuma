@@ -12,7 +12,7 @@ export function UserMessage({ message }: { message: string }) {
           backgroundColor={colors.surface}
           width="100%"
         >
-          <text>{message}</text>
+          <text fg={colors.text}>{message}</text>
         </box>
       </box>
     </box>
