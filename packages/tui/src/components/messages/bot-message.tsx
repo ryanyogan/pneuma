@@ -9,12 +9,14 @@ export function BotMessage({
   mode,
   duration,
   streaming = false,
+  interrupted = false,
 }: {
   model: string;
   parts: ClientMessagePart[];
   mode: Mode;
   duration?: string;
   streaming?: boolean;
+  interrupted?: boolean;
 }) {
   const { colors } = useTheme();
   const text = parts
@@ -32,11 +34,23 @@ export function BotMessage({
 
       <box paddingX={3} paddingBottom={1} gap={1} width="100%">
         <box flexDirection="row" gap={1}>
-          <text fg={mode === Mode.PLAN ? colors.planMode : colors.primary}>
+          <text
+            attributes={interrupted ? TextAttributes.DIM : 0}
+            fg={
+              interrupted
+                ? undefined
+                : mode === Mode.PLAN
+                  ? colors.planMode
+                  : colors.primary
+            }
+          >
             ◉
           </text>
           <box flexDirection="row" gap={1}>
-            <text fg={colors.textMuted}>
+            <text
+              fg={colors.textMuted}
+              attributes={interrupted ? TextAttributes.DIM : 0}
+            >
               {mode === Mode.PLAN ? "Plan" : "Build"}
             </text>
             <text attributes={TextAttributes.DIM} fg={colors.dimSeparator}>
@@ -45,13 +59,13 @@ export function BotMessage({
             <text attributes={TextAttributes.DIM} fg={colors.textMuted}>
               {model}
             </text>
-            {duration && (
+            {(duration || interrupted) && (
               <>
                 <text attributes={TextAttributes.DIM} fg={colors.dimSeparator}>
                   &gt;
                 </text>
                 <text attributes={TextAttributes.DIM} fg={colors.textMuted}>
-                  {duration}
+                  {interrupted ? "interrupted" : duration}
                 </text>
               </>
             )}

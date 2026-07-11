@@ -28,6 +28,7 @@ export type Message =
       model: SupportedChatModelId;
       parts: ClientMessagePart[];
       duration?: string;
+      interrupted?: boolean;
     }
   | {
       id: string;
@@ -50,6 +51,7 @@ type ActiveStream = {
   mode: Mode;
   model: SupportedChatModelId;
   parts: ClientMessagePart[];
+  interruptedCaptured: boolean;
 };
 
 type SubmitParams = {
@@ -100,6 +102,34 @@ export function useChat(sessionId: string, initialMessages: Message[]) {
       });
     },
     [isActiveRequest],
+  );
+
+  const captureInterruptedMessage = useCallback(
+    (activeStream: ActiveStream) => {
+      if (activeStream.interruptedCaptured || activeStream.parts.length === 0) {
+        return;
+      }
+
+      const parts = [...activeStream.parts];
+      const fullText = parts
+        .filter((part) => part.type === "text")
+        .map((part) => part.text)
+        .join("");
+
+      updateMessages((prev) => [
+        ...prev,
+        {
+          id: crypto.randomUUID(),
+          role: "assistant",
+          content: fullText,
+          mode: activeStream.mode,
+          model: activeStream.model,
+          parts,
+          interrupted: true,
+        },
+      ]);
+    },
+    [],
   );
 
   const clearStream = useCallback(
@@ -220,6 +250,7 @@ export function useChat(sessionId: string, initialMessages: Message[]) {
         mode,
         model,
         parts: [],
+        interruptedCaptured: false,
       };
 
       activeStreamRef.current = activeStream;
@@ -251,6 +282,22 @@ export function useChat(sessionId: string, initialMessages: Message[]) {
     [handleStream, clearStream, isActiveRequest, updateMessages],
   );
 
+  const stopActiveStream = useCallback(
+    (capturePartial: boolean) => {
+      const activeStream = activeStreamRef.current;
+      if (!activeStream) return;
+
+      if (capturePartial) {
+        captureInterruptedMessage(activeStream);
+      }
+
+      activeStreamRef.current = null;
+      setStreaming({ status: "idle" });
+      activeStream.controller.abort();
+    },
+    [captureInterruptedMessage],
+  );
+
   const resume = useCallback(
     async ({ mode, model }: Omit<SubmitParams, "userText">) => {
       await runStream({
@@ -269,6 +316,8 @@ export function useChat(sessionId: string, initialMessages: Message[]) {
 
   const submit = useCallback(
     async ({ userText, mode, model }: SubmitParams) => {
+      stopActiveStream(true);
+
       const userMessage: Message = {
         id: crypto.randomUUID(),
         role: "user",
@@ -293,17 +342,16 @@ export function useChat(sessionId: string, initialMessages: Message[]) {
         },
       });
     },
-    [runStream, sessionId, updateMessages],
+    [runStream, sessionId, updateMessages, stopActiveStream],
   );
 
   const abort = useCallback(() => {
-    const activeStream = activeStreamRef.current;
-    if (!activeStream) return;
+    stopActiveStream(false);
+  }, [stopActiveStream]);
 
-    activeStreamRef.current = null;
-    setStreaming({ status: "idle" });
-    activeStream.controller.abort();
-  }, [setStreaming]);
+  const interrupt = useCallback(() => {
+    stopActiveStream(true);
+  }, [stopActiveStream]);
 
   // TODO: Auto-Resume functionallity, clean this up
   const hasAutoResumedRef = useRef(false);
@@ -317,5 +365,5 @@ export function useChat(sessionId: string, initialMessages: Message[]) {
     void resume({ mode: last.mode, model: last.model });
   }, [initialMessages, resume]);
 
-  return { messages, streaming, submit, abort };
+  return { messages, streaming, submit, abort, interrupt };
 }
