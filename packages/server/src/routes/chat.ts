@@ -1,0 +1,254 @@
+import { MessageStatus, Mode, Role } from "@pneuma/database/enums";
+import { db } from "@pneuma/database/client";
+import { z } from "zod";
+import { isSupportedChatModel, resolveChatModel } from "../lib/models";
+import { zValidator } from "@hono/zod-validator";
+import { streamSSE } from "hono/streaming";
+import { streamText } from "ai";
+import type { ChatStreamEvent } from "@pneuma/shared";
+import { Hono } from "hono";
+
+type StreamParams = {
+  sessionId: string;
+  model: string;
+  history: {
+    role: "user" | "assistant";
+    content: string;
+  }[];
+  mode: Mode;
+  abortController: AbortController;
+};
+
+const mutateSchema = z.object({
+  content: z.string(),
+  mode: z.enum(Mode),
+  model: z.string().refine(isSupportedChatModel, "Unsupported model"),
+});
+
+const mutationValidator = zValidator("json", mutateSchema, (result, c) => {
+  if (!result.success) {
+    return c.json({ error: "Invalid request body" }, 400);
+  }
+});
+
+function buildConversationHistory(
+  messages: {
+    role: Role;
+    content: string;
+    status: MessageStatus;
+  }[],
+) {
+  return messages.flatMap((message) => {
+    if (message.role === "ERROR") return [];
+    if (message.role === "ASSISTANT" && message.content.length === 0) return [];
+
+    return [
+      {
+        role:
+          message.role === "USER" ? ("user" as const) : ("assistant" as const),
+        content: message.content,
+      },
+    ];
+  });
+}
+
+async function streamAIResponse(
+  stream: Parameters<Parameters<typeof streamSSE>[1]>[0],
+  params: StreamParams,
+) {
+  const { sessionId, mode, model, history, abortController } = params;
+  const startTime = Date.now();
+  const resolvedModel = resolveChatModel(model);
+
+  // yeah... it's really that simple
+  let fullText = "";
+
+  try {
+    const result = streamText({
+      model: resolvedModel.model,
+      messages: history,
+      abortSignal: abortController.signal,
+    });
+
+    for await (const part of result.fullStream) {
+      if (stream.aborted) break;
+
+      if (part.type === "text-delta") {
+        fullText += part.text;
+        const event: ChatStreamEvent = { type: "text-delta", text: part.text };
+        await stream.writeSSE({
+          event: "text-delta",
+          data: JSON.stringify(event),
+        });
+      }
+
+      if (part.type === "error") {
+        throw part.error;
+      }
+    }
+
+    if (stream.aborted || abortController.signal.aborted) {
+      return;
+    }
+
+    const elapsedMs = Date.now() - startTime;
+
+    const assistantMessage = await db.message.create({
+      data: {
+        sessionId,
+        role: "ASSISTANT",
+        status: MessageStatus.COMPLETE,
+        model,
+        content: fullText,
+        mode,
+        duration: Math.round(elapsedMs / 1000),
+      },
+    });
+
+    const doneEvent: ChatStreamEvent = {
+      type: "done",
+      messageId: assistantMessage.id,
+      durationMs: elapsedMs,
+    };
+
+    await stream.writeSSE({ event: "done", data: JSON.stringify(doneEvent) });
+  } catch (error) {
+    if (abortController.signal.aborted) {
+      return;
+    }
+
+    const message = error instanceof Error ? error.message : String(error);
+
+    await db.message.create({
+      data: {
+        sessionId,
+        role: "ERROR",
+        status: MessageStatus.COMPLETE,
+        model,
+        content: message,
+        mode,
+      },
+    });
+
+    const errorEvent: ChatStreamEvent = { type: "error", text: message };
+    await stream.writeSSE({ event: "error", data: JSON.stringify(errorEvent) });
+  }
+}
+
+const app = new Hono()
+  .post("/:sessionId/resume", async (c) => {
+    const sessionId = c.req.param("sessionId");
+    const session = await db.session.findUnique({
+      where: { id: sessionId },
+      include: { messages: { orderBy: { createdAt: "asc" } } },
+    });
+
+    if (!session) {
+      return c.json({ error: "Session not found" }, 404);
+    }
+
+    const lastMessage = session.messages[session.messages.length - 1];
+    if (!lastMessage || lastMessage.role !== "USER") {
+      return c.json(
+        { error: "Session has no pending user messages to resume" },
+        400,
+      );
+    }
+
+    if (!isSupportedChatModel(lastMessage.model)) {
+      return c.json(
+        { error: `Session uses unsupported model: ${lastMessage.model}` },
+        400,
+      );
+    }
+
+    const history = buildConversationHistory(session.messages);
+    const abortController = new AbortController();
+
+    return streamSSE(
+      c,
+      async (stream) => {
+        stream.onAbort(() => {
+          abortController.abort();
+        });
+
+        return streamAIResponse(stream, {
+          sessionId,
+          model: lastMessage.model,
+          history,
+          mode: lastMessage.mode,
+          abortController,
+        });
+      },
+      async (err, stream) => {
+        const message = err instanceof Error ? err.message : String(err);
+        const errorEvent: ChatStreamEvent = { type: "error", text: message };
+        await stream.writeSSE({
+          event: "error",
+          data: JSON.stringify(errorEvent),
+        });
+      },
+    );
+  })
+  .post("/:sessionId", mutationValidator, async (c) => {
+    const sessionId = c.req.param("sessionId");
+    const session = await db.session.findUnique({
+      where: { id: sessionId },
+      include: { messages: { orderBy: { createdAt: "asc" } } },
+    });
+
+    if (!session) {
+      return c.json({ error: "Session not found" }, 404);
+    }
+
+    const data = c.req.valid("json");
+
+    await db.message.create({
+      data: {
+        sessionId,
+        role: "USER",
+        status: MessageStatus.COMPLETE,
+        model: data.model,
+        content: data.content,
+        mode: data.mode,
+      },
+    });
+
+    const history = buildConversationHistory([
+      ...session.messages,
+      {
+        role: "USER" as const,
+        content: data.content,
+        status: MessageStatus.COMPLETE,
+      },
+    ]);
+
+    const abortController = new AbortController();
+
+    return streamSSE(
+      c,
+      async (stream) => {
+        stream.onAbort(() => {
+          abortController.abort();
+        });
+
+        return streamAIResponse(stream, {
+          sessionId,
+          model: data.model,
+          history,
+          mode: data.mode,
+          abortController,
+        });
+      },
+      async (err, stream) => {
+        const message = err instanceof Error ? err.message : String(err);
+        const errorEvent: ChatStreamEvent = { type: "error", text: message };
+        await stream.writeSSE({
+          event: "error",
+          data: JSON.stringify(errorEvent),
+        });
+      },
+    );
+  });
+
+export default app;
