@@ -6,6 +6,7 @@ import { useToast } from "../providers/toast";
 import { apiClient } from "../lib/api-client";
 import { DEFAULT_CHAT_MODEL_ID } from "@pneuma/shared";
 import { getErrorMessage } from "../lib/http-error";
+import { SessionShell } from "../components/session-shell";
 
 const newSessionStateSchema = z.object({
   message: z.string(),
@@ -82,8 +83,9 @@ export function NewSession() {
 
   if (!state) return null;
 
-  // The shell (scrollbox, input, spinner) lives in SessionLayout; render only
-  // the content. Loading is already `true` by default in the layout while the
-  // session is being created.
-  return <UserMessage message={state.message} />;
+  return (
+    <SessionShell onSubmit={() => {}} inputDisabled loading>
+      <UserMessage message={state.message} />
+    </SessionShell>
+  );
 }

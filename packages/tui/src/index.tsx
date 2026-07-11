@@ -2,7 +2,6 @@ import { ConsolePosition, createCliRenderer } from "@opentui/core";
 import { createRoot } from "@opentui/react";
 import { createMemoryRouter, RouterProvider } from "react-router";
 import { RootLayout } from "./layouts/root-layout";
-import { SessionLayout } from "./layouts/session-layout";
 import { Home } from "./screens/home";
 import { NewSession } from "./screens/new-session";
 import { Session } from "./screens/session";
@@ -12,16 +11,17 @@ const router = createMemoryRouter([
     path: "/",
     element: <RootLayout />,
     children: [
-      { index: true, element: <Home /> },
-      // Pathless layout route: SessionLayout (and its scrollbox) stays mounted
-      // across the new -> session transition, so the scrollbox is never torn
-      // down and rebuilt — eliminating the scrollbar flicker on navigation.
       {
-        element: <SessionLayout />,
-        children: [
-          { path: "sessions/new", element: <NewSession /> },
-          { path: "sessions/:id", element: <Session /> },
-        ],
+        index: true,
+        element: <Home />,
+      },
+      {
+        path: "sessions/new",
+        element: <NewSession />,
+      },
+      {
+        path: "sessions/:id",
+        element: <Session />,
       },
     ],
   },

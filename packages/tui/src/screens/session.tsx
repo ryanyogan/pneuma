@@ -6,12 +6,18 @@ import {
   useParams,
 } from "react-router";
 import { BotMessage, ErrorMessage, UserMessage } from "../components/messages";
-import type { SessionChrome } from "../layouts/session-layout";
 import { z } from "zod";
 import { useToast } from "../providers/toast";
 import { apiClient } from "../lib/api-client";
 import { getErrorMessage } from "../lib/http-error";
 import type { InferResponseType } from "hono";
+import {
+  DEFAULT_CHAT_MODEL_ID,
+  type SupportedChatModelId,
+} from "@pneuma/shared";
+import { useChat, type Message } from "../hooks/use-chat";
+import prettyMs from "pretty-ms";
+import { SessionShell } from "../components/session-shell";
 
 type SessionData = InferResponseType<
   (typeof apiClient.sessions)[":id"]["$get"],
@@ -24,20 +30,92 @@ const sessionLocationSchema = z.object({
   ),
 });
 
-function ChatMessage({ msg }: { msg: SessionData["messages"][number] }) {
+function mapMessages(messages: SessionData["messages"]): Message[] {
+  return messages.map((message): Message => {
+    if (message.role === "ERROR") {
+      return { id: message.id, role: "error", content: message.content };
+    }
+
+    if (message.role === "USER") {
+      return {
+        id: message.id,
+        role: "user",
+        content: message.content,
+        mode: message.mode,
+        model: message.model as SupportedChatModelId,
+      };
+    }
+
+    return {
+      id: message.id,
+      role: "assistant",
+      content: message.content,
+      mode: message.mode,
+      model: message.model as SupportedChatModelId,
+      parts: [{ type: "text", text: message.content }],
+      ...(message.duration != null
+        ? { duration: prettyMs(message.duration * 1_000) }
+        : {}),
+    };
+  });
+}
+
+function ChatMessage({ msg }: { msg: Message }) {
   switch (msg.role) {
-    case "USER": {
+    case "user": {
       return <UserMessage message={msg.content} />;
     }
 
-    case "ERROR": {
+    case "error": {
       return <ErrorMessage message={msg.content} />;
     }
 
     default: {
-      return <BotMessage content={msg.content} model={msg.model} />;
+      return (
+        <BotMessage
+          parts={msg.parts}
+          model={msg.model}
+          mode={msg.mode}
+          duration={msg.duration}
+          streaming={false}
+        />
+      );
     }
   }
+}
+
+function SessionChat({ session }: { session: SessionData }) {
+  const [initialMessages] = useState(() => mapMessages(session.messages));
+  const { messages, streaming, submit, abort } = useChat(
+    session.id,
+    initialMessages,
+  );
+
+  useEffect(() => {
+    return () => abort();
+  }, [abort]);
+
+  return (
+    <SessionShell
+      onSubmit={(text) =>
+        submit({ userText: text, mode: "BUILD", model: DEFAULT_CHAT_MODEL_ID })
+      }
+      loading={streaming.status === "streaming"}
+    >
+      {messages.map((message) => (
+        <ChatMessage key={message.id} msg={message} />
+      ))}
+
+      {streaming.status === "streaming" && streaming.parts.length > 0 && (
+        <BotMessage
+          parts={streaming.parts}
+          model={streaming.model}
+          mode={streaming.mode}
+          streaming
+        />
+      )}
+    </SessionShell>
+  );
 }
 
 export function Session() {
@@ -45,7 +123,6 @@ export function Session() {
   const navigate = useNavigate();
   const location = useLocation();
   const toast = useToast();
-  const { setLoading } = useOutletContext<SessionChrome>();
 
   const prefetched = useMemo(() => {
     const parsed = sessionLocationSchema.safeParse(location.state);
@@ -93,20 +170,9 @@ export function Session() {
     };
   }, [navigate, toast, id, prefetched]);
 
-  // Drive the shared shell's spinner: pending until the session is loaded.
-  useEffect(() => {
-    setLoading(!session);
-  }, [session, setLoading]);
+  if (!session) {
+    return <SessionShell onSubmit={() => {}} inputDisabled loading />;
+  }
 
-  // The shell lives in SessionLayout; while loading it already shows the
-  // spinner, so render nothing until the session resolves.
-  if (!session) return null;
-
-  return (
-    <>
-      {session.messages.map((message) => (
-        <ChatMessage key={message.id} msg={message} />
-      ))}
-    </>
-  );
+  return <SessionChat key={session.id} session={session} />;
 }
