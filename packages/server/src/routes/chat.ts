@@ -106,7 +106,7 @@ async function streamAIResponse(
     });
 
     for await (const part of result.fullStream) {
-      if (stream.aborted) break;
+      if (stream.aborted || abortController.signal.aborted) break;
 
       if (part.type === "text-delta") {
         fullText += part.text;
@@ -169,6 +169,16 @@ async function streamAIResponse(
 
     const errorEvent: ChatStreamEvent = { type: "error", text: message };
     await stream.writeSSE({ event: "error", data: JSON.stringify(errorEvent) });
+  } finally {
+    // Ensure the model generation is always torn down. `streamText` runs the
+    // provider request in a background task and, via `fullStream`, tees the
+    // response into a second branch we never drain — that branch buffers the
+    // entire response until the result is collected. Aborting here severs the
+    // provider fetch and lets those buffers release promptly instead of
+    // lingering (until GC, or up to `idleTimeout` for a half-open connection).
+    if (!abortController.signal.aborted) {
+      abortController.abort();
+    }
   }
 }
 
