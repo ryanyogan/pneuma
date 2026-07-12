@@ -50,6 +50,36 @@ const MAX_CONCURRENT_STREAMS = 32;
 // are race-free.
 let activeStreamCount = 0;
 
+// Ceiling on how long a persistence write may block the stream lifecycle. A
+// stalled database (unreachable, pool exhausted) must not pin `streamAIResponse`
+// open forever, or the concurrency counter and resume lock never release and the
+// server wedges at the cap. On timeout we surface an error and let the stream
+// tear down normally.
+const DB_WRITE_TIMEOUT_MS = 10_000;
+
+function withTimeout<T>(
+  operation: Promise<T>,
+  ms: number,
+  label: string,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`${label} timed out after ${ms}ms`));
+    }, ms);
+
+    operation.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
+
 type ConversationHistory = {
   role: "user" | "assistant";
   content: string;
@@ -124,17 +154,21 @@ async function streamAIResponse(
 
     const elapsedMs = Date.now() - startTime;
 
-    await db.message.create({
-      data: {
-        sessionId,
-        role: "ASSISTANT",
-        status: MessageStatus.INTERRUPTED,
-        model,
-        content: fullText,
-        mode,
-        duration: Math.round(elapsedMs / 1_000),
-      },
-    });
+    await withTimeout(
+      db.message.create({
+        data: {
+          sessionId,
+          role: "ASSISTANT",
+          status: MessageStatus.INTERRUPTED,
+          model,
+          content: fullText,
+          mode,
+          duration: Math.round(elapsedMs / 1_000),
+        },
+      }),
+      DB_WRITE_TIMEOUT_MS,
+      "persist interrupted message",
+    );
   };
 
   try {
@@ -168,17 +202,21 @@ async function streamAIResponse(
 
     const elapsedMs = Date.now() - startTime;
 
-    const assistantMessage = await db.message.create({
-      data: {
-        sessionId,
-        role: "ASSISTANT",
-        status: MessageStatus.COMPLETE,
-        model,
-        content: fullText,
-        mode,
-        duration: Math.round(elapsedMs / 1000),
-      },
-    });
+    const assistantMessage = await withTimeout(
+      db.message.create({
+        data: {
+          sessionId,
+          role: "ASSISTANT",
+          status: MessageStatus.COMPLETE,
+          model,
+          content: fullText,
+          mode,
+          duration: Math.round(elapsedMs / 1000),
+        },
+      }),
+      DB_WRITE_TIMEOUT_MS,
+      "persist assistant message",
+    );
 
     const doneEvent: ChatStreamEvent = {
       type: "done",
@@ -195,16 +233,20 @@ async function streamAIResponse(
 
     const message = error instanceof Error ? error.message : String(error);
 
-    await db.message.create({
-      data: {
-        sessionId,
-        role: "ERROR",
-        status: MessageStatus.COMPLETE,
-        model,
-        content: message,
-        mode,
-      },
-    });
+    await withTimeout(
+      db.message.create({
+        data: {
+          sessionId,
+          role: "ERROR",
+          status: MessageStatus.COMPLETE,
+          model,
+          content: message,
+          mode,
+        },
+      }),
+      DB_WRITE_TIMEOUT_MS,
+      "persist error message",
+    );
 
     const errorEvent: ChatStreamEvent = { type: "error", text: message };
     await stream.writeSSE({ event: "error", data: JSON.stringify(errorEvent) });
