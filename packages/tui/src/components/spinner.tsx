@@ -1,7 +1,9 @@
 import "opentui-spinner/react";
 import { useTheme } from "../providers/theme";
+import { Mode } from "@pneuma/database/enums";
 
-export function Spinner() {
+export function Spinner({ mode = Mode.BUILD }: { mode?: Mode }) {
   const { colors } = useTheme();
-  return <spinner name="aesthetic" color={colors.primary} />;
+  const activeColor = mode === Mode.PLAN ? colors.planMode : colors.primary;
+  return <spinner name="aesthetic" color={activeColor} />;
 }

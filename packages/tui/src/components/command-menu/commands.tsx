@@ -1,4 +1,10 @@
-import { SessionDialogContent, ThemeDialogContent } from "../dialogs";
+import { SUPPORTED_CHAT_MODELS } from "@pneuma/shared";
+import {
+  AgentDialogContext,
+  SessionDialogContent,
+  ThemeDialogContent,
+} from "../dialogs";
+import { ModelsDialogContext } from "../dialogs";
 import type { Command } from "./types";
 
 export const COMMANDS: Command[] = [
@@ -16,8 +22,13 @@ export const COMMANDS: Command[] = [
     value: "/agents",
     action: (context) => {
       context.dialog.open({
-        title: "Select Mode",
-        children: <text>Agent selection coming soon...</text>,
+        title: "Select Agent",
+        children: (
+          <AgentDialogContext
+            currentMode={context.mode}
+            onSelectMode={context.setMode}
+          />
+        ),
       });
     },
   },
@@ -25,6 +36,17 @@ export const COMMANDS: Command[] = [
     name: "models",
     description: "Select AI model for generation",
     value: "/models",
+    action: (context) => {
+      context.dialog.open({
+        title: "Select Model",
+        children: (
+          <ModelsDialogContext
+            models={SUPPORTED_CHAT_MODELS.map((model) => model.id)}
+            onSelectModel={context.setModel}
+          />
+        ),
+      });
+    },
   },
   {
     name: "sessions",
