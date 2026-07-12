@@ -1,4 +1,4 @@
-import { ThemeDialogContent } from "../dialogs";
+import { SessionDialogContent, ThemeDialogContent } from "../dialogs";
 import type { Command } from "./types";
 
 export const COMMANDS: Command[] = [
@@ -7,7 +7,7 @@ export const COMMANDS: Command[] = [
     description: "Start a new conversation",
     value: "/new",
     action: (context) => {
-      context.toast.show({ message: "Starting a new conversation..." });
+      context.navigate("/");
     },
   },
   {
@@ -30,6 +30,12 @@ export const COMMANDS: Command[] = [
     name: "sessions",
     description: "Browse past sessions",
     value: "/sessions",
+    action: (context) => {
+      context.dialog.open({
+        title: "Sessions",
+        children: <SessionDialogContent />,
+      });
+    },
   },
   {
     name: "theme",
