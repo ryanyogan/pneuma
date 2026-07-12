@@ -7,6 +7,7 @@ import { streamSSE } from "hono/streaming";
 import { streamText } from "ai";
 import type { ChatStreamEvent } from "@pneuma/shared";
 import { Hono } from "hono";
+import type { Context } from "hono";
 
 type StreamParams = {
   sessionId: string;
@@ -33,13 +34,34 @@ const mutationValidator = zValidator("json", mutateSchema, (result, c) => {
 
 const activeResumeSessions = new Set<string>();
 
+// Upper bound on model turns kept per request. Sending the whole session every
+// turn makes each request's memory (and token cost) grow without limit and
+// eventually trips the provider's context window. Keep a sliding window of the
+// most recent turns instead.
+const MAX_HISTORY_MESSAGES = 40;
+
+// Hard cap on concurrent in-flight model streams. Each stream holds the request
+// history plus the streamed response (buffered twice by the AI SDK's tee), so
+// unbounded fan-out is what turns a traffic burst into a lasting memory plateau.
+const MAX_CONCURRENT_STREAMS = 32;
+
+// Count of model streams currently being produced. Bun runs JS on a single
+// thread, so plain increments/decrements around the synchronous admission check
+// are race-free.
+let activeStreamCount = 0;
+
+type ConversationHistory = {
+  role: "user" | "assistant";
+  content: string;
+}[];
+
 function buildConversationHistory(
   messages: {
     role: Role;
     content: string;
     status: MessageStatus;
   }[],
-) {
+): ConversationHistory {
   return messages.flatMap((message) => {
     if (message.role === "ERROR") return [];
     if (message.role === "ASSISTANT" && message.content.length === 0) return [];
@@ -52,6 +74,23 @@ function buildConversationHistory(
       },
     ];
   });
+}
+
+// Trim the history to the most recent MAX_HISTORY_MESSAGES turns. Anthropic (and
+// most providers) require the first message to be a user turn, so if the window
+// happens to start on an assistant turn we drop leading assistant messages until
+// it begins with a user turn.
+function windowConversationHistory(
+  history: ConversationHistory,
+): ConversationHistory {
+  if (history.length <= MAX_HISTORY_MESSAGES) return history;
+
+  const windowed = history.slice(-MAX_HISTORY_MESSAGES);
+  const firstUserIndex = windowed.findIndex(
+    (message) => message.role === "user",
+  );
+
+  return firstUserIndex <= 0 ? windowed : windowed.slice(firstUserIndex);
 }
 
 function getResumableUserMessage(
@@ -182,6 +221,61 @@ async function streamAIResponse(
   }
 }
 
+// Wires up an SSE model stream: accounts for it against the concurrency cap,
+// owns the AbortController, and guarantees the counter (and any caller cleanup)
+// is released exactly once on every terminal path — success, error, interrupt,
+// or a synchronous failure to start the stream.
+function runChatStream(
+  c: Context,
+  params: {
+    sessionId: string;
+    model: string;
+    mode: Mode;
+    history: ConversationHistory;
+  },
+  onSettled?: () => void,
+) {
+  activeStreamCount++;
+  const abortController = new AbortController();
+
+  let settled = false;
+  const settle = () => {
+    if (settled) return;
+    settled = true;
+    activeStreamCount--;
+    onSettled?.();
+  };
+
+  try {
+    return streamSSE(
+      c,
+      async (stream) => {
+        stream.onAbort(() => {
+          abortController.abort();
+        });
+
+        try {
+          await streamAIResponse(stream, { ...params, abortController });
+        } finally {
+          settle();
+        }
+      },
+      async (err, stream) => {
+        settle();
+        const message = err instanceof Error ? err.message : String(err);
+        const errorEvent: ChatStreamEvent = { type: "error", text: message };
+        await stream.writeSSE({
+          event: "error",
+          data: JSON.stringify(errorEvent),
+        });
+      },
+    );
+  } catch (error) {
+    settle();
+    throw error;
+  }
+}
+
 const app = new Hono()
   .post("/:sessionId/resume", async (c) => {
     const sessionId = c.req.param("sessionId");
@@ -213,45 +307,24 @@ const app = new Hono()
       return c.json({ error: "Session already has an active resume" }, 409);
     }
 
+    if (activeStreamCount >= MAX_CONCURRENT_STREAMS) {
+      return c.json({ error: "Server is busy, please retry shortly" }, 503);
+    }
+
     activeResumeSessions.add(sessionId);
 
-    const history = buildConversationHistory(session.messages);
-    const abortController = new AbortController();
-
-    try {
-      return streamSSE(
-        c,
-        async (stream) => {
-          stream.onAbort(() => {
-            abortController.abort();
-          });
-
-          try {
-            await streamAIResponse(stream, {
-              sessionId,
-              model: resumableMessage.model,
-              history,
-              mode: resumableMessage.mode,
-              abortController,
-            });
-          } finally {
-            activeResumeSessions.delete(sessionId);
-          }
-        },
-        async (err, stream) => {
-          activeResumeSessions.delete(sessionId);
-          const message = err instanceof Error ? err.message : String(err);
-          const errorEvent: ChatStreamEvent = { type: "error", text: message };
-          await stream.writeSSE({
-            event: "error",
-            data: JSON.stringify(errorEvent),
-          });
-        },
-      );
-    } catch (error) {
-      activeResumeSessions.delete(sessionId);
-      throw error;
-    }
+    return runChatStream(
+      c,
+      {
+        sessionId,
+        model: resumableMessage.model,
+        mode: resumableMessage.mode,
+        history: windowConversationHistory(
+          buildConversationHistory(session.messages),
+        ),
+      },
+      () => activeResumeSessions.delete(sessionId),
+    );
   })
   .post("/:sessionId", mutationValidator, async (c) => {
     const sessionId = c.req.param("sessionId");
@@ -266,6 +339,8 @@ const app = new Hono()
 
     const data = c.req.valid("json");
 
+    // Persist the user turn before the admission check so an overload response
+    // never loses the message — it stays resumable via the resume endpoint.
     await db.message.create({
       data: {
         sessionId,
@@ -277,41 +352,27 @@ const app = new Hono()
       },
     });
 
-    const history = buildConversationHistory([
-      ...session.messages,
-      {
-        role: "USER" as const,
-        content: data.content,
-        status: MessageStatus.COMPLETE,
-      },
-    ]);
+    if (activeStreamCount >= MAX_CONCURRENT_STREAMS) {
+      return c.json({ error: "Server is busy, please retry shortly" }, 503);
+    }
 
-    const abortController = new AbortController();
-
-    return streamSSE(
-      c,
-      async (stream) => {
-        stream.onAbort(() => {
-          abortController.abort();
-        });
-
-        return streamAIResponse(stream, {
-          sessionId,
-          model: data.model,
-          history,
-          mode: data.mode,
-          abortController,
-        });
-      },
-      async (err, stream) => {
-        const message = err instanceof Error ? err.message : String(err);
-        const errorEvent: ChatStreamEvent = { type: "error", text: message };
-        await stream.writeSSE({
-          event: "error",
-          data: JSON.stringify(errorEvent),
-        });
-      },
+    const history = windowConversationHistory(
+      buildConversationHistory([
+        ...session.messages,
+        {
+          role: "USER" as const,
+          content: data.content,
+          status: MessageStatus.COMPLETE,
+        },
+      ]),
     );
+
+    return runChatStream(c, {
+      sessionId,
+      model: data.model,
+      mode: data.mode,
+      history,
+    });
   });
 
 export default app;
