@@ -7,6 +7,7 @@ import { streamSSE } from "hono/streaming";
 import { streamText } from "ai";
 import type { ChatStreamEvent } from "@pneuma/shared";
 import { Hono } from "hono";
+import type { Context } from "hono";
 
 type StreamParams = {
   sessionId: string;
@@ -33,13 +34,64 @@ const mutationValidator = zValidator("json", mutateSchema, (result, c) => {
 
 const activeResumeSessions = new Set<string>();
 
+// Upper bound on model turns kept per request. Sending the whole session every
+// turn makes each request's memory (and token cost) grow without limit and
+// eventually trips the provider's context window. Keep a sliding window of the
+// most recent turns instead.
+const MAX_HISTORY_MESSAGES = 40;
+
+// Hard cap on concurrent in-flight model streams. Each stream holds the request
+// history plus the streamed response (buffered twice by the AI SDK's tee), so
+// unbounded fan-out is what turns a traffic burst into a lasting memory plateau.
+const MAX_CONCURRENT_STREAMS = 32;
+
+// Count of model streams currently being produced. Bun runs JS on a single
+// thread, so plain increments/decrements around the synchronous admission check
+// are race-free.
+let activeStreamCount = 0;
+
+// Ceiling on how long a persistence write may block the stream lifecycle. A
+// stalled database (unreachable, pool exhausted) must not pin `streamAIResponse`
+// open forever, or the concurrency counter and resume lock never release and the
+// server wedges at the cap. On timeout we surface an error and let the stream
+// tear down normally.
+const DB_WRITE_TIMEOUT_MS = 10_000;
+
+function withTimeout<T>(
+  operation: Promise<T>,
+  ms: number,
+  label: string,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`${label} timed out after ${ms}ms`));
+    }, ms);
+
+    operation.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
+
+type ConversationHistory = {
+  role: "user" | "assistant";
+  content: string;
+}[];
+
 function buildConversationHistory(
   messages: {
     role: Role;
     content: string;
     status: MessageStatus;
   }[],
-) {
+): ConversationHistory {
   return messages.flatMap((message) => {
     if (message.role === "ERROR") return [];
     if (message.role === "ASSISTANT" && message.content.length === 0) return [];
@@ -52,6 +104,23 @@ function buildConversationHistory(
       },
     ];
   });
+}
+
+// Trim the history to the most recent MAX_HISTORY_MESSAGES turns. Anthropic (and
+// most providers) require the first message to be a user turn, so if the window
+// happens to start on an assistant turn we drop leading assistant messages until
+// it begins with a user turn.
+function windowConversationHistory(
+  history: ConversationHistory,
+): ConversationHistory {
+  if (history.length <= MAX_HISTORY_MESSAGES) return history;
+
+  const windowed = history.slice(-MAX_HISTORY_MESSAGES);
+  const firstUserIndex = windowed.findIndex(
+    (message) => message.role === "user",
+  );
+
+  return firstUserIndex <= 0 ? windowed : windowed.slice(firstUserIndex);
 }
 
 function getResumableUserMessage(
@@ -85,17 +154,21 @@ async function streamAIResponse(
 
     const elapsedMs = Date.now() - startTime;
 
-    await db.message.create({
-      data: {
-        sessionId,
-        role: "ASSISTANT",
-        status: MessageStatus.INTERRUPTED,
-        model,
-        content: fullText,
-        mode,
-        duration: Math.round(elapsedMs / 1_000),
-      },
-    });
+    await withTimeout(
+      db.message.create({
+        data: {
+          sessionId,
+          role: "ASSISTANT",
+          status: MessageStatus.INTERRUPTED,
+          model,
+          content: fullText,
+          mode,
+          duration: Math.round(elapsedMs / 1_000),
+        },
+      }),
+      DB_WRITE_TIMEOUT_MS,
+      "persist interrupted message",
+    );
   };
 
   try {
@@ -106,7 +179,7 @@ async function streamAIResponse(
     });
 
     for await (const part of result.fullStream) {
-      if (stream.aborted) break;
+      if (stream.aborted || abortController.signal.aborted) break;
 
       if (part.type === "text-delta") {
         fullText += part.text;
@@ -129,17 +202,21 @@ async function streamAIResponse(
 
     const elapsedMs = Date.now() - startTime;
 
-    const assistantMessage = await db.message.create({
-      data: {
-        sessionId,
-        role: "ASSISTANT",
-        status: MessageStatus.COMPLETE,
-        model,
-        content: fullText,
-        mode,
-        duration: Math.round(elapsedMs / 1000),
-      },
-    });
+    const assistantMessage = await withTimeout(
+      db.message.create({
+        data: {
+          sessionId,
+          role: "ASSISTANT",
+          status: MessageStatus.COMPLETE,
+          model,
+          content: fullText,
+          mode,
+          duration: Math.round(elapsedMs / 1000),
+        },
+      }),
+      DB_WRITE_TIMEOUT_MS,
+      "persist assistant message",
+    );
 
     const doneEvent: ChatStreamEvent = {
       type: "done",
@@ -156,19 +233,88 @@ async function streamAIResponse(
 
     const message = error instanceof Error ? error.message : String(error);
 
-    await db.message.create({
-      data: {
-        sessionId,
-        role: "ERROR",
-        status: MessageStatus.COMPLETE,
-        model,
-        content: message,
-        mode,
-      },
-    });
+    await withTimeout(
+      db.message.create({
+        data: {
+          sessionId,
+          role: "ERROR",
+          status: MessageStatus.COMPLETE,
+          model,
+          content: message,
+          mode,
+        },
+      }),
+      DB_WRITE_TIMEOUT_MS,
+      "persist error message",
+    );
 
     const errorEvent: ChatStreamEvent = { type: "error", text: message };
     await stream.writeSSE({ event: "error", data: JSON.stringify(errorEvent) });
+  } finally {
+    // Ensure the model generation is always torn down. `streamText` runs the
+    // provider request in a background task and, via `fullStream`, tees the
+    // response into a second branch we never drain — that branch buffers the
+    // entire response until the result is collected. Aborting here severs the
+    // provider fetch and lets those buffers release promptly instead of
+    // lingering (until GC, or up to `idleTimeout` for a half-open connection).
+    if (!abortController.signal.aborted) {
+      abortController.abort();
+    }
+  }
+}
+
+// Wires up an SSE model stream: accounts for it against the concurrency cap,
+// owns the AbortController, and guarantees the counter (and any caller cleanup)
+// is released exactly once on every terminal path — success, error, interrupt,
+// or a synchronous failure to start the stream.
+function runChatStream(
+  c: Context,
+  params: {
+    sessionId: string;
+    model: string;
+    mode: Mode;
+    history: ConversationHistory;
+  },
+  onSettled?: () => void,
+) {
+  activeStreamCount++;
+  const abortController = new AbortController();
+
+  let settled = false;
+  const settle = () => {
+    if (settled) return;
+    settled = true;
+    activeStreamCount--;
+    onSettled?.();
+  };
+
+  try {
+    return streamSSE(
+      c,
+      async (stream) => {
+        stream.onAbort(() => {
+          abortController.abort();
+        });
+
+        try {
+          await streamAIResponse(stream, { ...params, abortController });
+        } finally {
+          settle();
+        }
+      },
+      async (err, stream) => {
+        settle();
+        const message = err instanceof Error ? err.message : String(err);
+        const errorEvent: ChatStreamEvent = { type: "error", text: message };
+        await stream.writeSSE({
+          event: "error",
+          data: JSON.stringify(errorEvent),
+        });
+      },
+    );
+  } catch (error) {
+    settle();
+    throw error;
   }
 }
 
@@ -203,45 +349,24 @@ const app = new Hono()
       return c.json({ error: "Session already has an active resume" }, 409);
     }
 
+    if (activeStreamCount >= MAX_CONCURRENT_STREAMS) {
+      return c.json({ error: "Server is busy, please retry shortly" }, 503);
+    }
+
     activeResumeSessions.add(sessionId);
 
-    const history = buildConversationHistory(session.messages);
-    const abortController = new AbortController();
-
-    try {
-      return streamSSE(
-        c,
-        async (stream) => {
-          stream.onAbort(() => {
-            abortController.abort();
-          });
-
-          try {
-            await streamAIResponse(stream, {
-              sessionId,
-              model: resumableMessage.model,
-              history,
-              mode: resumableMessage.mode,
-              abortController,
-            });
-          } finally {
-            activeResumeSessions.delete(sessionId);
-          }
-        },
-        async (err, stream) => {
-          activeResumeSessions.delete(sessionId);
-          const message = err instanceof Error ? err.message : String(err);
-          const errorEvent: ChatStreamEvent = { type: "error", text: message };
-          await stream.writeSSE({
-            event: "error",
-            data: JSON.stringify(errorEvent),
-          });
-        },
-      );
-    } catch (error) {
-      activeResumeSessions.delete(sessionId);
-      throw error;
-    }
+    return runChatStream(
+      c,
+      {
+        sessionId,
+        model: resumableMessage.model,
+        mode: resumableMessage.mode,
+        history: windowConversationHistory(
+          buildConversationHistory(session.messages),
+        ),
+      },
+      () => activeResumeSessions.delete(sessionId),
+    );
   })
   .post("/:sessionId", mutationValidator, async (c) => {
     const sessionId = c.req.param("sessionId");
@@ -256,6 +381,8 @@ const app = new Hono()
 
     const data = c.req.valid("json");
 
+    // Persist the user turn before the admission check so an overload response
+    // never loses the message — it stays resumable via the resume endpoint.
     await db.message.create({
       data: {
         sessionId,
@@ -267,41 +394,27 @@ const app = new Hono()
       },
     });
 
-    const history = buildConversationHistory([
-      ...session.messages,
-      {
-        role: "USER" as const,
-        content: data.content,
-        status: MessageStatus.COMPLETE,
-      },
-    ]);
+    if (activeStreamCount >= MAX_CONCURRENT_STREAMS) {
+      return c.json({ error: "Server is busy, please retry shortly" }, 503);
+    }
 
-    const abortController = new AbortController();
-
-    return streamSSE(
-      c,
-      async (stream) => {
-        stream.onAbort(() => {
-          abortController.abort();
-        });
-
-        return streamAIResponse(stream, {
-          sessionId,
-          model: data.model,
-          history,
-          mode: data.mode,
-          abortController,
-        });
-      },
-      async (err, stream) => {
-        const message = err instanceof Error ? err.message : String(err);
-        const errorEvent: ChatStreamEvent = { type: "error", text: message };
-        await stream.writeSSE({
-          event: "error",
-          data: JSON.stringify(errorEvent),
-        });
-      },
+    const history = windowConversationHistory(
+      buildConversationHistory([
+        ...session.messages,
+        {
+          role: "USER" as const,
+          content: data.content,
+          status: MessageStatus.COMPLETE,
+        },
+      ]),
     );
+
+    return runChatStream(c, {
+      sessionId,
+      model: data.model,
+      mode: data.mode,
+      history,
+    });
   });
 
 export default app;
