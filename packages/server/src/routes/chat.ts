@@ -4,14 +4,23 @@ import { z } from "zod";
 import { isSupportedChatModel, resolveChatModel } from "../lib/models";
 import { zValidator } from "@hono/zod-validator";
 import { streamSSE } from "hono/streaming";
-import { streamText } from "ai";
-import type { ChatStreamEvent } from "@pneuma/shared";
+import { stepCountIs, streamText } from "ai";
+import {
+  messagePartsSchema,
+  toolCallArgsSchema,
+  type ChatStreamEvent,
+  type MessagePart,
+} from "@pneuma/shared";
 import { Hono } from "hono";
 import type { Context } from "hono";
+import type { Prisma, Session } from "@pneuma/database";
+import { createTools } from "../tools";
+import { buildSystemPrompt } from "../system-prompt";
 
 type StreamParams = {
   sessionId: string;
   model: string;
+  cwd: string | null;
   history: {
     role: "user" | "assistant";
     content: string;
@@ -142,17 +151,26 @@ async function streamAIResponse(
   stream: Parameters<Parameters<typeof streamSSE>[1]>[0],
   params: StreamParams,
 ) {
-  const { sessionId, mode, model, history, abortController } = params;
+  const { sessionId, mode, model, history, abortController, cwd } = params;
   const startTime = Date.now();
+  const tools = cwd ? createTools(cwd, mode) : undefined;
+  const parts: MessagePart[] = [];
   const resolvedModel = resolveChatModel(model);
 
-  // yeah... it's really that simple
-  let fullText = "";
-
   const persistInterruptedMessage = async () => {
-    if (fullText.length === 0) return;
+    const fullText = parts
+      .filter((part) => part.type === "text")
+      .map((part) => part.text)
+      .join("");
+
+    if (fullText.length === 0 && parts.length === 0) {
+      return;
+    }
 
     const elapsedMs = Date.now() - startTime;
+
+    const validatedParts: Prisma.InputJsonValue | undefined =
+      parts.length > 0 ? messagePartsSchema.parse(parts) : undefined;
 
     await withTimeout(
       db.message.create({
@@ -162,6 +180,7 @@ async function streamAIResponse(
           status: MessageStatus.INTERRUPTED,
           model,
           content: fullText,
+          parts: validatedParts,
           mode,
           duration: Math.round(elapsedMs / 1_000),
         },
@@ -174,18 +193,98 @@ async function streamAIResponse(
   try {
     const result = streamText({
       model: resolvedModel.model,
+      system: buildSystemPrompt({ cwd, mode }),
+      tools,
+      stopWhen: tools ? stepCountIs(50) : undefined,
       messages: history,
       abortSignal: abortController.signal,
+      providerOptions: resolvedModel.providerOptions,
     });
 
-    for await (const part of result.fullStream) {
+    for await (const part of result.stream) {
       if (stream.aborted || abortController.signal.aborted) break;
 
+      if (part.type === "reasoning-delta") {
+        const last = parts[parts.length - 1];
+        if (last && last.type === "reasoning") {
+          last.text += part.text;
+        } else {
+          parts.push({ type: "reasoning", text: part.text });
+        }
+
+        const event: ChatStreamEvent = {
+          type: "reasoning-delta",
+          text: part.text,
+        };
+
+        await stream.writeSSE({
+          event: "reasoning-delta",
+          data: JSON.stringify(event),
+        });
+      }
+
       if (part.type === "text-delta") {
-        fullText += part.text;
+        const last = parts[parts.length - 1];
+        if (last && last.type === "text") {
+          last.text += part.text;
+        } else {
+          parts.push({ type: "text", text: part.text });
+        }
+
         const event: ChatStreamEvent = { type: "text-delta", text: part.text };
+
         await stream.writeSSE({
           event: "text-delta",
+          data: JSON.stringify(event),
+        });
+      }
+
+      if (part.type === "tool-call") {
+        const args = toolCallArgsSchema.parse(part.input);
+
+        parts.push({
+          type: "tool-call",
+          id: part.toolCallId,
+          name: part.toolName,
+          args,
+        });
+
+        const event: ChatStreamEvent = {
+          type: "tool-call",
+          toolCallId: part.toolCallId,
+          toolName: part.toolName,
+          args,
+        };
+
+        await stream.writeSSE({
+          event: "tool-call",
+          data: JSON.stringify(event),
+        });
+      }
+
+      if (part.type === "tool-result") {
+        const resultStr =
+          typeof part.output === "string"
+            ? part.output
+            : JSON.stringify(part.output);
+
+        const toolCallPart = parts.find(
+          (p): p is Extract<MessagePart, { type: "tool-call" }> =>
+            p.type === "tool-call" && p.id === part.toolCallId,
+        );
+
+        if (toolCallPart) {
+          toolCallPart.result = resultStr;
+        }
+
+        const event: ChatStreamEvent = {
+          type: "tool-result",
+          toolCallId: part.toolCallId,
+          result: resultStr,
+        };
+
+        await stream.writeSSE({
+          event: "tool-result",
           data: JSON.stringify(event),
         });
       }
@@ -202,6 +301,14 @@ async function streamAIResponse(
 
     const elapsedMs = Date.now() - startTime;
 
+    const fullText = parts
+      .filter((p) => p.type === "text")
+      .map((p) => p.text)
+      .join("");
+
+    const validatedParts: Prisma.InputJsonValue | undefined =
+      parts.length > 0 ? messagePartsSchema.parse(parts) : undefined;
+
     const assistantMessage = await withTimeout(
       db.message.create({
         data: {
@@ -210,6 +317,7 @@ async function streamAIResponse(
           status: MessageStatus.COMPLETE,
           model,
           content: fullText,
+          parts: validatedParts,
           mode,
           duration: Math.round(elapsedMs / 1000),
         },
@@ -274,6 +382,7 @@ function runChatStream(
     model: string;
     mode: Mode;
     history: ConversationHistory;
+    session: Session;
   },
   onSettled?: () => void,
 ) {
@@ -297,7 +406,11 @@ function runChatStream(
         });
 
         try {
-          await streamAIResponse(stream, { ...params, abortController });
+          await streamAIResponse(stream, {
+            ...params,
+            abortController,
+            cwd: params.session.cwd,
+          });
         } finally {
           settle();
         }
@@ -359,6 +472,7 @@ const app = new Hono()
       c,
       {
         sessionId,
+        session,
         model: resumableMessage.model,
         mode: resumableMessage.mode,
         history: windowConversationHistory(
@@ -414,6 +528,7 @@ const app = new Hono()
       model: data.model,
       mode: data.mode,
       history,
+      session,
     });
   });
 

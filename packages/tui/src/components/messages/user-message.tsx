@@ -1,10 +1,22 @@
+import { Mode } from "@pneuma/database";
 import { useTheme } from "../../providers/theme";
 
-export function UserMessage({ message }: { message: string }) {
+export function UserMessage({
+  message,
+  mode,
+}: {
+  message: string;
+  mode: Mode;
+}) {
   const { colors } = useTheme();
+
   return (
     <box width="100%" alignItems="center">
-      <box border={["left"]} borderColor={colors.primary} width="100%">
+      <box
+        border={["left"]}
+        borderColor={mode === Mode.PLAN ? colors.planMode : colors.primary}
+        width="100%"
+      >
         <box
           justifyContent="center"
           paddingX={2}

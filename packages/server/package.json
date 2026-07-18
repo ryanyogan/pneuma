@@ -13,6 +13,7 @@
   "dependencies": {
     "@ai-sdk/anthropic": "^4.0.11",
     "@ai-sdk/openai": "^4.0.11",
+    "@ai-sdk/provider-utils": "^5.0.7",
     "@hono/zod-validator": "^0.8.0",
     "@pneuma/database": "workspace:*",
     "@pneuma/shared": "workspace:*",
